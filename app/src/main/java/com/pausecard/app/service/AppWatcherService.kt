@@ -10,19 +10,26 @@ import android.app.Service
 import androidx.core.app.NotificationCompat
 import com.pausecard.app.PauseCardApp
 import com.pausecard.app.R
+import com.pausecard.app.groq.GroqCardGenerator
 import com.pausecard.app.overlay.CardOverlayManager
 import com.pausecard.app.overlay.OverlayStateManager
 import com.pausecard.app.util.CrashReporting
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 class AppWatcherService : Service() {
 
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var usageStatsManager: UsageStatsManager? = null
     private var wakeLock: PowerManager.WakeLock? = null
     @Volatile private var isRunning = false
     private var lastInterceptedPackage: String? = null
     private var lastInterceptTime: Long = 0
     private var overlayManager: CardOverlayManager? = null
-    private val cooldownMs = 15000L
+    private val cooldownMs = 20000L
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -46,9 +53,32 @@ class AppWatcherService : Service() {
             startForegroundWithNotification()
             acquireWakeLock()
             startPolling()
+            preFetchGroqCards()
         }
 
         return START_STICKY
+    }
+
+    private fun preFetchGroqCards() {
+        serviceScope.launch {
+            try {
+                val generator = GroqCardGenerator(this@AppWatcherService)
+                val today = java.time.LocalDate.now().toString()
+                val lastDate = generator.getLastCallDate()
+                val count = generator.getDailyCallCount()
+                val db = com.pausecard.app.data.db.PauseCardDatabase.getInstance(this@AppWatcherService)
+                val cardCount = db.cardDao().getCardCount()
+
+                if (lastDate != today || count == 0) {
+                    if (cardCount < 30) {
+                        CrashReporting.logInfo(TAG, "Pre-fetching Groq cards (only $cardCount in DB)")
+                        generator.generateCards()
+                    }
+                }
+            } catch (e: Exception) {
+                CrashReporting.logError(TAG, "Groq pre-fetch failed (non-critical)", e)
+            }
+        }
     }
 
     private fun startForegroundWithNotification() {
@@ -75,9 +105,18 @@ class AppWatcherService : Service() {
 
     private fun startPolling() {
         Thread({
+            var lastSeenPackage: String? = null
+            var lastSeenTime: Long = 0
+
             while (isRunning) {
                 try {
-                    checkForegroundApp()
+                    checkForegroundApp { pkg, time ->
+                        if (pkg != lastSeenPackage || (time - lastSeenTime) > 3000) {
+                            lastSeenPackage = pkg
+                            lastSeenTime = time
+                            handleForegroundApp(pkg)
+                        }
+                    }
                 } catch (e: Exception) {
                     CrashReporting.logError(TAG, "Polling error", e)
                 }
@@ -94,23 +133,30 @@ class AppWatcherService : Service() {
         }
     }
 
-    private fun checkForegroundApp() {
+    private fun checkForegroundApp(onApp: (String, Long) -> Unit) {
         val usm = usageStatsManager ?: return
         val now = System.currentTimeMillis()
-        val events = usm.queryEvents(now - 2000, now)
+        val events = usm.queryEvents(now - 5000, now)
 
         val event = UsageEvents.Event()
         var topPackage: String? = null
+        var topTime: Long = 0
 
         while (events.hasNextEvent()) {
             events.getNextEvent(event)
-            if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND) {
-                topPackage = event.packageName
+            when (event.eventType) {
+                UsageEvents.Event.ACTIVITY_RESUMED,
+                UsageEvents.Event.MOVE_TO_FOREGROUND -> {
+                    if (event.timeStamp >= topTime) {
+                        topPackage = event.packageName
+                        topTime = event.timeStamp
+                    }
+                }
             }
         }
 
         if (topPackage != null && topPackage != packageName) {
-            handleForegroundApp(topPackage)
+            onApp(topPackage, topTime)
         }
     }
 
@@ -131,7 +177,7 @@ class AppWatcherService : Service() {
 
     private fun isAppEnabled(packageName: String): Boolean {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getBoolean("app_enabled_$packageName", true)
+        return prefs.getBoolean("app_enabled_$packageName", false)
     }
 
     private fun getAppLabel(packageName: String): String {
@@ -147,6 +193,7 @@ class AppWatcherService : Service() {
 
     override fun onDestroy() {
         isRunning = false
+        serviceScope.cancel()
         overlayManager?.cleanup()
         overlayManager = null
         wakeLock?.let {
@@ -169,7 +216,7 @@ class AppWatcherService : Service() {
     companion object {
         private const val TAG = "AppWatcherService"
         private const val NOTIFICATION_ID = 1001
-        private const val POLL_INTERVAL_MS = 1200L
+        private const val POLL_INTERVAL_MS = 800L
         private const val PREFS_NAME = "pausecard_prefs"
         const val ACTION_STOP = "com.pausecard.app.STOP_SERVICE"
 

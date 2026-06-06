@@ -139,7 +139,6 @@ fun OnboardingScreen(
                     ?: pm.getApplicationLabel(info.activityInfo.applicationInfo).toString()
                 pkg to label
             }
-            .filter { MONITORABLE_APPS.containsKey(it.first) }
             .sortedBy { it.second.lowercase() }
     }
 
@@ -147,7 +146,7 @@ fun OnboardingScreen(
 
     LaunchedEffect(Unit) {
         for ((pkg, _) in installedApps) {
-            selectedApps[pkg] = true
+            selectedApps[pkg] = MONITORABLE_APPS.containsKey(pkg)
         }
     }
 
