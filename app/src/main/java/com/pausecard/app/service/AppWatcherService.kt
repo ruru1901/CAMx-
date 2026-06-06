@@ -1,6 +1,5 @@
 package com.pausecard.app.service
 
-import android.app.ActivityManager
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Context
@@ -19,33 +18,18 @@ class AppWatcherService : Service() {
 
     private var usageStatsManager: UsageStatsManager? = null
     private var wakeLock: PowerManager.WakeLock? = null
-    private var isRunning = false
+    @Volatile private var isRunning = false
     private var lastInterceptedPackage: String? = null
     private var lastInterceptTime: Long = 0
-    private val cooldownMs = 30000L
-
-    private val targetPackages = setOf(
-        "com.instagram.android",
-        "com.instagram.barcelona",
-        "com.google.android.youtube",
-        "com.google.android.youtube.music",
-        "com.zhiliaoapp.musically",
-        "com.ss.android.ugc.trill",
-        "com.twitter.android",
-        "com.facebook.katana",
-        "com.snapchat.android",
-        "com.reddit.frontpage",
-        "com.netflix.mediaclient",
-        "com.spotify.music",
-        "com.discord",
-        "com.tiktok"
-    )
+    private var overlayManager: CardOverlayManager? = null
+    private val cooldownMs = 15000L
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager
+        overlayManager = CardOverlayManager(this)
         CrashReporting.logInfo(TAG, "AppWatcherService created")
     }
 
@@ -85,30 +69,35 @@ class AppWatcherService : Service() {
             PowerManager.PARTIAL_WAKE_LOCK,
             "PauseCard::WatcherWakeLock"
         )?.apply {
-            acquire(60 * 60 * 1000L) // 1 hour max
+            acquire(60 * 60 * 1000L)
         }
     }
 
     private fun startPolling() {
-        val pollingThread = Thread {
+        Thread({
             while (isRunning) {
                 try {
                     checkForegroundApp()
                 } catch (e: Exception) {
                     CrashReporting.logError(TAG, "Polling error", e)
                 }
-                Thread.sleep(POLL_INTERVAL_MS)
+                try {
+                    Thread.sleep(POLL_INTERVAL_MS)
+                } catch (e: InterruptedException) {
+                    break
+                }
             }
+            CrashReporting.logInfo(TAG, "Polling thread ended")
+        }, "AppWatcher-Poll").apply {
+            isDaemon = true
+            start()
         }
-        pollingThread.isDaemon = true
-        pollingThread.name = "AppWatcher-Poll"
-        pollingThread.start()
     }
 
     private fun checkForegroundApp() {
         val usm = usageStatsManager ?: return
         val now = System.currentTimeMillis()
-        val events = usm.queryEvents(now - 5000, now)
+        val events = usm.queryEvents(now - 2000, now)
 
         val event = UsageEvents.Event()
         var topPackage: String? = null
@@ -125,32 +114,24 @@ class AppWatcherService : Service() {
         }
     }
 
-    private fun handleForegroundApp(packageName: String) {
+    private fun handleForegroundApp(pkg: String) {
         val now = System.currentTimeMillis()
 
-        if (packageName == lastInterceptedPackage && (now - lastInterceptTime) < cooldownMs) {
-            return
-        }
+        if (OverlayStateManager.isOverlayShowing()) return
+        if (pkg == lastInterceptedPackage && (now - lastInterceptTime) < cooldownMs) return
+        if (!isAppEnabled(pkg)) return
 
-        if (isAppEnabled(packageName) && !OverlayStateManager.isOverlayShowing()) {
-            CrashReporting.logInfo(TAG, "INTERCEPTED: $packageName")
-            lastInterceptedPackage = packageName
-            lastInterceptTime = now
+        CrashReporting.logInfo(TAG, "INTERCEPTED: $pkg")
+        lastInterceptedPackage = pkg
+        lastInterceptTime = now
 
-            val appName = getAppLabel(packageName)
-            val intent = Intent(this, CardOverlayManager::class.java).apply {
-                action = CardOverlayManager.ACTION_SHOW_CARD
-                putExtra(CardOverlayManager.EXTRA_PACKAGE_NAME, packageName)
-                putExtra(CardOverlayManager.EXTRA_APP_NAME, appName)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            startService(intent)
-        }
+        val appName = getAppLabel(pkg)
+        overlayManager?.showCard(pkg, appName)
     }
 
     private fun isAppEnabled(packageName: String): Boolean {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.getBoolean("app_$packageName", targetPackages.contains(packageName))
+        return prefs.getBoolean("app_enabled_$packageName", true)
     }
 
     private fun getAppLabel(packageName: String): String {
@@ -166,6 +147,8 @@ class AppWatcherService : Service() {
 
     override fun onDestroy() {
         isRunning = false
+        overlayManager?.cleanup()
+        overlayManager = null
         wakeLock?.let {
             if (it.isHeld) it.release()
         }
@@ -173,10 +156,20 @@ class AppWatcherService : Service() {
         super.onDestroy()
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        val prefs = getSharedPreferences("pausecard_prefs", Context.MODE_PRIVATE)
+        if (prefs.getBoolean("service_enabled", true)) {
+            CrashReporting.logInfo(TAG, "Task removed, restarting service")
+            val restartIntent = Intent(applicationContext, AppWatcherService::class.java)
+            startForegroundService(restartIntent)
+        }
+    }
+
     companion object {
         private const val TAG = "AppWatcherService"
         private const val NOTIFICATION_ID = 1001
-        private const val POLL_INTERVAL_MS = 1500L
+        private const val POLL_INTERVAL_MS = 1200L
         private const val PREFS_NAME = "pausecard_prefs"
         const val ACTION_STOP = "com.pausecard.app.STOP_SERVICE"
 
