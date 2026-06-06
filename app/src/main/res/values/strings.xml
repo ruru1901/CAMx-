@@ -1,0 +1,28 @@
+<resources>
+    <string name="app_name">PauseCard</string>
+    <string name="notification_channel_name">PauseCard Service</string>
+    <string name="notification_channel_description">Monitors app launches to show learning cards</string>
+    <string name="foreground_notification_title">PauseCard is active</string>
+    <string name="foreground_notification_text">Watching for doom-scroll triggers</string>
+    <string name="onboarding_welcome_title">Welcome to PauseCard</string>
+    <string name="onboarding_welcome_body">Instead of scrolling, learn one useful thing.\nPauseCard shows a 15-second micro-learning card before addictive apps open.</string>
+    <string name="onboarding_step1_title">Usage Access</string>
+    <string name="onboarding_step1_body">PauseCard needs to detect which apps you open. This requires Usage Access permission.\n\nTap \"Grant\" to open system settings, then find PauseCard and enable it.</string>
+    <string name="onboarding_step2_title">Display Over Apps</string>
+    <string name="onboarding_step2_body">PauseCard shows learning cards as an overlay on top of other apps.\n\nTap \"Grant\" and enable \"Display over other apps\" for PauseCard.</string>
+    <string name="onboarding_step3_title">Notifications</string>
+    <string name="onboarding_step3_body">PauseCard runs as a foreground service to monitor apps reliably.\n\nTap \"Grant\" to allow the notification (required for the service to run).</string>
+    <string name="settings_title">Settings</string>
+    <string name="settings_managed_apps">Monitored Apps</string>
+    <string name="settings_categories">Card Categories</string>
+    <string name="settings_groq_key">Groq API Key</string>
+    <string name="settings_interests">Your Interests</string>
+    <string name="settings_auto_start">Auto-Start Permission</string>
+    <string name="settings_battery_opt">Battery Optimization</string>
+    <string name="settings_focus_hours">Focus Hours</string>
+    <string name="settings_focus_hours_desc">During focus hours, Continue button is hidden (must wait full 15 seconds)</string>
+    <string name="card_you_were_opening">You were opening %s</string>
+    <string name="card_continue">Continue</string>
+    <string name="card_seconds_left">%ds</string>
+    <string name="card_not_interested">Not interested</string>
+</resources>
