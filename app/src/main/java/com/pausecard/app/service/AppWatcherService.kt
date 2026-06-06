@@ -49,11 +49,15 @@ class AppWatcherService : Service() {
         }
 
         if (!isRunning) {
+            CrashReporting.logInfo(TAG, "Starting foreground service")
             isRunning = true
             startForegroundWithNotification()
             acquireWakeLock()
             startPolling()
             preFetchGroqCards()
+            CrashReporting.logInfo(TAG, "Service fully started")
+        } else {
+            CrashReporting.logInfo(TAG, "onStartCommand called but already running")
         }
 
         return START_STICKY
@@ -82,15 +86,34 @@ class AppWatcherService : Service() {
     }
 
     private fun startForegroundWithNotification() {
-        val notification = NotificationCompat.Builder(this, PauseCardApp.CHANNEL_ID)
-            .setContentTitle(getString(R.string.foreground_notification_title))
-            .setContentText(getString(R.string.foreground_notification_text))
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
+        try {
+            val notification = NotificationCompat.Builder(this, PauseCardApp.CHANNEL_ID)
+                .setContentTitle(getString(R.string.foreground_notification_title))
+                .setContentText(getString(R.string.foreground_notification_text))
+                .setSmallIcon(R.drawable.ic_notification_pause)
+                .setOngoing(true)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .build()
 
-        startForeground(NOTIFICATION_ID, notification)
+            startForeground(NOTIFICATION_ID, notification)
+            CrashReporting.logInfo(TAG, "Foreground notification shown")
+        } catch (e: Exception) {
+            CrashReporting.logError(TAG, "startForeground failed", e)
+            // Try once more with a system icon as fallback
+            try {
+                val fallback = NotificationCompat.Builder(this, PauseCardApp.CHANNEL_ID)
+                    .setContentTitle(getString(R.string.foreground_notification_title))
+                    .setContentText(getString(R.string.foreground_notification_text))
+                    .setSmallIcon(android.R.drawable.ic_dialog_info)
+                    .setOngoing(true)
+                    .setPriority(NotificationCompat.PRIORITY_LOW)
+                    .build()
+                startForeground(NOTIFICATION_ID, fallback)
+                CrashReporting.logInfo(TAG, "Foreground notification shown with fallback icon")
+            } catch (e2: Exception) {
+                CrashReporting.logError(TAG, "startForeground fallback also failed", e2)
+            }
+        }
     }
 
     private fun acquireWakeLock() {
@@ -105,20 +128,27 @@ class AppWatcherService : Service() {
 
     private fun startPolling() {
         Thread({
+            CrashReporting.logInfo(TAG, "Polling thread started (interval=${POLL_INTERVAL_MS}ms)")
             var lastSeenPackage: String? = null
             var lastSeenTime: Long = 0
+            var pollCount = 0
 
             while (isRunning) {
                 try {
+                    pollCount++
                     checkForegroundApp { pkg, time ->
                         if (pkg != lastSeenPackage || (time - lastSeenTime) > 3000) {
                             lastSeenPackage = pkg
                             lastSeenTime = time
+                            CrashReporting.logInfo(TAG, "Detected: $pkg at $time")
                             handleForegroundApp(pkg)
                         }
                     }
                 } catch (e: Exception) {
                     CrashReporting.logError(TAG, "Polling error", e)
+                }
+                if (pollCount % 100 == 0) {
+                    CrashReporting.logInfo(TAG, "Polling alive: ${pollCount} polls so far")
                 }
                 try {
                     Thread.sleep(POLL_INTERVAL_MS)
@@ -134,16 +164,27 @@ class AppWatcherService : Service() {
     }
 
     private fun checkForegroundApp(onApp: (String, Long) -> Unit) {
-        val usm = usageStatsManager ?: return
+        val usm = usageStatsManager
+        if (usm == null) {
+            CrashReporting.logWarning(TAG, "usageStatsManager is null")
+            return
+        }
         val now = System.currentTimeMillis()
         val events = usm.queryEvents(now - 5000, now)
+        if (events == null) {
+            CrashReporting.logWarning(TAG, "queryEvents returned null")
+            return
+        }
 
         val event = UsageEvents.Event()
         var topPackage: String? = null
         var topTime: Long = 0
+        var eventCount = 0
 
         while (events.hasNextEvent()) {
             events.getNextEvent(event)
+            eventCount++
+            CrashReporting.logInfo(TAG, "Event: pkg=${event.packageName} type=${event.eventType} time=${event.timeStamp}")
             when (event.eventType) {
                 UsageEvents.Event.ACTIVITY_RESUMED,
                 UsageEvents.Event.MOVE_TO_FOREGROUND -> {
@@ -155,6 +196,7 @@ class AppWatcherService : Service() {
             }
         }
 
+        CrashReporting.logInfo(TAG, "Poll: ${eventCount} events found, top=$topPackage")
         if (topPackage != null && topPackage != packageName) {
             onApp(topPackage, topTime)
         }
@@ -163,16 +205,28 @@ class AppWatcherService : Service() {
     private fun handleForegroundApp(pkg: String) {
         val now = System.currentTimeMillis()
 
-        if (OverlayStateManager.isOverlayShowing()) return
-        if (pkg == lastInterceptedPackage && (now - lastInterceptTime) < cooldownMs) return
-        if (!isAppEnabled(pkg)) return
+        CrashReporting.logInfo(TAG, "handleForegroundApp: $pkg")
+
+        if (OverlayStateManager.isOverlayShowing()) {
+            CrashReporting.logInfo(TAG, "Skipped: overlay already showing")
+            return
+        }
+        if (pkg == lastInterceptedPackage && (now - lastInterceptTime) < cooldownMs) {
+            CrashReporting.logInfo(TAG, "Skipped: within cooldown")
+            return
+        }
+        if (!isAppEnabled(pkg)) {
+            CrashReporting.logInfo(TAG, "Skipped: $pkg not enabled in prefs")
+            return
+        }
 
         CrashReporting.logInfo(TAG, "INTERCEPTED: $pkg")
         lastInterceptedPackage = pkg
         lastInterceptTime = now
 
         val appName = getAppLabel(pkg)
-        overlayManager?.showCard(pkg, appName)
+        val shown = overlayManager?.showCard(pkg, appName)
+        CrashReporting.logInfo(TAG, "showCard returned: $shown")
     }
 
     private fun isAppEnabled(packageName: String): Boolean {
